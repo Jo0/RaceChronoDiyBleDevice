@@ -1,22 +1,16 @@
-#include <CAN.h>
 #include <RaceChrono.h>
 
+#include "can_bus_reader.h"
 #include "config.h"
 
-// Connections:
-//  MCP | BOARD
-//  INT | Not used, can connect to Pin 9
-//  SCK | SCK
-//   SI | MO
-//   SO | MI
-//   CS | Pin 7
-//  GND | GND
-//  VCC | 3.3V
-const int CS_PIN = 7;
-const int IRQ_PIN = 9;
-
-const long QUARTZ_CLOCK_FREQUENCY = 16 * 1E6;  // 16 MHz.
-const uint32_t SPI_FREQUENCY = 10 * 1E6;  // 10 MHz.
+// This board (LOLIN S3 Pro) uses the ESP32-S3's native TWAI controller
+// through a bare SN65HVD230 transceiver, not an MCP2515 SPI CAN controller
+// board -- so there's no CS/IRQ/quartz/SPI-frequency setup here. See
+// can_bus_reader.h/.cpp for that, and docs/D29-CAN-Bus-Power-Wiring.md
+// section 5 for why these two GPIOs specifically (picked to avoid this
+// board's strapping pins and its I2C/SPI/RGB-LED/UART0 pin assignments).
+const int CAN_TX_PIN = 4;  // -> SN65HVD230 CTX
+const int CAN_RX_PIN = 5;  // <- SN65HVD230 CRX
 
 bool isCanBusReaderActive = false;
 long lastCanMessageReceivedMs;
@@ -172,12 +166,18 @@ void waitForConnection() {
 
 bool startCanBusReader() {
   Serial.println("Connecting to the CAN bus...");
-  CAN.setClockFrequency(QUARTZ_CLOCK_FREQUENCY);
-  CAN.setSPIFrequency(SPI_FREQUENCY);
-  CAN.setPins(CS_PIN, IRQ_PIN);
 
-  boolean result = CAN.begin(BAUD_RATE);
-  if (!result) {
+#if defined(CAN_BUS_SELF_TEST)
+  Serial.println(
+      "*** CAN_BUS_SELF_TEST build -- transmits fake frames onto the bus. "
+      "DO NOT install this build in the car. ***");
+  bool started = canBusReaderBegin(
+      CAN_RX_PIN, CAN_TX_PIN, BAUD_RATE, /*selfTest=*/true);
+#else
+  bool started = canBusReaderBegin(CAN_RX_PIN, CAN_TX_PIN, BAUD_RATE);
+#endif
+
+  if (!started) {
     Serial.println("ERROR: Unable to start the CAN bus listener.");
     return false;
   }
@@ -189,7 +189,7 @@ bool startCanBusReader() {
 }
 
 void stopCanBusReader() {
-  CAN.end();
+  canBusReaderEnd();
   isCanBusReaderActive = false;
 }
 
@@ -222,9 +222,9 @@ void loop() {
 
   uint32_t timeNowMs = millis();
 
-  // I've observed that MCP2515 has a tendency to just stop responding for some
-  // weird reason. Just kill it if we don't have any data for 100 ms. The
-  // timeout might need to be tweaked for some cars.
+  // Bail out and restart the peripheral if the bus goes quiet for too long
+  // (e.g. it lands in an error-passive/bus-off state). The timeout might
+  // need to be tweaked for some cars.
   if (timeNowMs - lastCanMessageReceivedMs > 100) {
     Serial.println("ERROR: CAN bus timeout, aborting.");
     num_can_bus_timeouts++;
@@ -233,35 +233,34 @@ void loop() {
     return;
   }
 
-  // Sending data over Bluetooth takes time, and MCP2515 only has two buffers
-  // for received messages. Once a buffer is full, further messages are dropped.
-  // Instead of relying on the MCP2515 buffering, we aggressively read messages
-  // from the MCP2515 and put them into our memory.
-  //
-  // TODO: It might be more efficient to use interrupts to read data from
-  // MCP2515 as soon as it's available instead of polling all the time. The
-  // interrupts don't work out of the box with nRF52 Adafruit boards though, and
-  // need to be handled carefully wrt synchronization between the interrupt
-  // handling and processing of received data.
-  int packetSize;
-  while ((packetSize = CAN.parsePacket()) > 0) {
-    if (CAN.packetRtr()) {
-      // Ignore RTRs as they don't contain any data.
-      continue;
-    }
+#if defined(CAN_BUS_SELF_TEST)
+  // Bench smoke test: manufacture a plausible "Engine RPM" frame on CAN ID
+  // 0x140 every 100ms, sweeping 800-7000 RPM, using the same bit layout as
+  // the "Engine RPM" equation in docs/D29-CAN-Bus-Power-Wiring.md section 7
+  // (bitsToUIntLe(raw, 16, 14) -- i.e. a 14-bit little-endian field starting
+  // at byte 2). Configure that channel in RaceChrono and you should see a
+  // sawtooth RPM sweep with zero bench hardware beyond this one board.
+  static uint32_t last_test_frame_sent_ms = 0;
+  if (timeNowMs - last_test_frame_sent_ms >= 100) {
+    static uint16_t fake_rpm = 800;
+    fake_rpm = (fake_rpm >= 7000) ? 800 : fake_rpm + 40;
 
-    uint32_t pid = CAN.packetId();
-    uint8_t data[8];
-    int data_length = 0;
-    while (data_length < packetSize && data_length < sizeof(data)) {
-      int byte_read = CAN.read();
-      if (byte_read == -1) {
-        break;
-      }
+    uint8_t data[8] = {0};
+    data[2] = fake_rpm & 0xff;
+    data[3] = (fake_rpm >> 8) & 0x3f;
+    canBusReaderSendTestFrame(0x140, data, sizeof(data));
 
-      data[data_length++] = byte_read;
-    }
+    last_test_frame_sent_ms = timeNowMs;
+  }
+#endif
 
+  // Sending data over Bluetooth takes time, so we drain the TWAI driver's
+  // own RX queue aggressively into our own (larger) software ring buffer
+  // rather than letting frames pile up and get dropped upstream.
+  uint32_t pid;
+  uint8_t data[8];
+  uint8_t data_length;
+  while (canBusReaderReceive(&pid, data, &data_length)) {
     if (data_length == 0) {
       // Nothing to send here. Can this even happen?
       continue;
