@@ -2,6 +2,7 @@
 
 #include "can_bus_reader.h"
 #include "config.h"
+#include "web_debug.h"
 
 // This board (LOLIN S3 Pro) uses the ESP32-S3's native TWAI controller
 // through a bare SN65HVD230 transceiver, not an MCP2515 SPI CAN controller
@@ -12,8 +13,25 @@
 const int CAN_TX_PIN = 4;  // -> SN65HVD230 CTX
 const int CAN_RX_PIN = 5;  // <- SN65HVD230 CRX
 
+// Where the CAN feed is going, if anywhere. RaceChrono always wins: if it
+// connects while a web debug session is streaming, the web session is dropped
+// and Wi-Fi is switched off for the whole RaceChrono session. The ESP32-S3
+// time-slices a single 2.4 GHz radio between Wi-Fi and BLE, and a SoftAP
+// costs BLE airtime even with nobody connected to it.
+enum class Mode {
+  IDLE,        // BLE advertising + debug AP up, CAN reader off.
+  RACECHRONO,  // CAN -> BLE. Wi-Fi off.
+  WEB_DEBUG,   // CAN -> debug web page. BLE still advertising.
+};
+Mode mode = Mode::IDLE;
+
 bool isCanBusReaderActive = false;
 long lastCanMessageReceivedMs;
+
+// Only throttles retries after the TWAI driver refused to start; a restart
+// after a bus timeout is still immediate.
+bool lastCanStartFailed = false;
+uint32_t lastCanStartFailedMs = 0;
 
 struct PidExtra {
   // Only send one out of |updateRateDivider| packets per PID.
@@ -29,8 +47,12 @@ uint32_t loop_iteration = 0;
 uint32_t last_time_num_can_bus_timeouts_sent_ms = 0;
 uint16_t num_can_bus_timeouts = 0;
 
+// Only reported on the debug web page, never to RaceChrono.
+uint32_t num_buffer_overflows = 0;
+uint32_t last_can_status_published_ms = 0;
+
 // Forward declarations to help put code in a natural reading order.
-void waitForConnection();
+void enterMode(Mode newMode);
 void bufferNewPacket(uint32_t pid, uint8_t *data, uint8_t data_length);
 void handleOneBufferedPacket();
 void flushBufferedPackets();
@@ -140,28 +162,55 @@ void setup() {
   RaceChronoBle.setUp(DEVICE_NAME, &raceChronoHandler);
   RaceChronoBle.startAdvertising();
 
-  Serial.println("BLE is set up, waiting for an incoming connection.");
-  waitForConnection();
+  Serial.println("Setting up the Wi-Fi debug page...");
+  webDebugBegin(WEB_DEBUG_AP_SSID, WEB_DEBUG_AP_PASSWORD, WEB_DEBUG_AP_CHANNEL,
+                WEB_DEBUG_AP_IP, WEB_DEBUG_CLIENT_TIMEOUT_MS);
+
+  enterMode(Mode::IDLE);
 }
 
-void waitForConnection() {
-  uint32_t iteration = 0;
-  bool lastPrintHadNewline = false;
-  while (!RaceChronoBle.waitForConnection(1000)) {
-    Serial.print(".");
-    if ((++iteration) % 10 == 0) {
-      lastPrintHadNewline = true;
-      Serial.println();
-    } else {
-      lastPrintHadNewline = false;
-    }
+const char *modeName(Mode m) {
+  switch (m) {
+    case Mode::IDLE: return "IDLE (waiting for RaceChrono over BLE, or the debug web page)";
+    case Mode::RACECHRONO: return "RACECHRONO (CAN -> BLE, Wi-Fi off)";
+    case Mode::WEB_DEBUG: return "WEB_DEBUG (CAN -> debug web page)";
+  }
+  return "?";
+}
+
+Mode desiredMode() {
+  if (RaceChronoBle.isConnected()) {
+    return Mode::RACECHRONO;
+  }
+  if (webDebugIsStreaming()) {
+    return Mode::WEB_DEBUG;
+  }
+  return Mode::IDLE;
+}
+
+void enterMode(Mode newMode) {
+  if (mode == Mode::RACECHRONO && newMode != Mode::RACECHRONO) {
+    Serial.println("RaceChrono disconnected!");
+    raceChronoHandler.handleDisconnect();
   }
 
-  if (!lastPrintHadNewline) {
-    Serial.println();
+  // Every mode change restarts the CAN reader from scratch (or leaves it off
+  // for IDLE), so no buffered frames leak from one consumer to the other.
+  if (isCanBusReaderActive) {
+    stopCanBusReader();
   }
+  lastCanStartFailed = false;
 
-  Serial.println("Connected.");
+  mode = newMode;
+  webDebugSetApEnabled(newMode != Mode::RACECHRONO);
+
+  Serial.print("Mode: ");
+  Serial.println(modeName(newMode));
+
+  if (newMode == Mode::RACECHRONO) {
+    Serial.println("Connected.");
+    sendNumCanBusTimeouts();
+  }
 }
 
 bool startCanBusReader() {
@@ -193,31 +242,65 @@ void stopCanBusReader() {
   isCanBusReaderActive = false;
 }
 
+void publishCanStatusToWebDebug() {
+  CanBusReaderStats stats;
+  canBusReaderGetStats(&stats);
+
+  WebDebugCanStatus status;
+  status.readerActive = isCanBusReaderActive && stats.running;
+  status.startFailed = lastCanStartFailed;
+  status.busOff = stats.busOff;
+  status.bitRate = BAUD_RATE;
+  status.rxErrorCounter = stats.rxErrorCounter;
+  status.busErrors = stats.busErrors;
+  status.rxMissed = stats.rxMissed;
+  status.rxOverrun = stats.rxOverrun;
+  status.timeouts = num_can_bus_timeouts;
+  status.bufferOverflows = num_buffer_overflows;
+  webDebugSetCanStatus(status);
+}
+
 void loop() {
   loop_iteration++;
 
-  // First, verify that we have both Bluetooth and CAN up and running.
+  // First, work out who (if anyone) the CAN feed is for: RaceChrono over BLE,
+  // the debug web page over Wi-Fi, or nobody.
 
   // Not clear how heavy is the isConnected() call. Only check the connectivity
-  // every 100 iterations to avoid stalling the CAN bus loop.
-  if ((loop_iteration % 100) == 0 && !RaceChronoBle.isConnected()) {
-    Serial.println("RaceChrono disconnected!");
-    raceChronoHandler.handleDisconnect();
-    stopCanBusReader();
-
-    Serial.println("Waiting for a new connection.");
-    waitForConnection();
-    sendNumCanBusTimeouts();
+  // every 100 iterations to avoid stalling the CAN bus loop. IDLE has no CAN
+  // loop to stall, so it checks on every pass.
+  if (mode == Mode::IDLE || (loop_iteration % 100) == 0) {
+    Mode wanted = desiredMode();
+    if (wanted != mode) {
+      enterMode(wanted);
+    }
   }
 
-  while (!isCanBusReaderActive) {
-    if (startCanBusReader()) {
-      flushBufferedPackets();
-      resetSkippedUpdatesCounters();
-      lastCanMessageReceivedMs = millis();
-      break;
+  if (millis() - last_can_status_published_ms >= 100) {
+    publishCanStatusToWebDebug();
+    last_can_status_published_ms = millis();
+  }
+
+  if (mode == Mode::IDLE) {
+    delay(10);
+    return;
+  }
+
+  if (!isCanBusReaderActive) {
+    // Never block here (the old code sat in a delay(1000) loop): mode changes
+    // like the web page going away must still be noticed.
+    if (lastCanStartFailed && millis() - lastCanStartFailedMs < 1000) {
+      return;
     }
-    delay(1000);
+    if (!startCanBusReader()) {
+      lastCanStartFailed = true;
+      lastCanStartFailedMs = millis();
+      return;
+    }
+    lastCanStartFailed = false;
+    flushBufferedPackets();
+    resetSkippedUpdatesCounters();
+    lastCanMessageReceivedMs = millis();
   }
 
   uint32_t timeNowMs = millis();
@@ -228,7 +311,9 @@ void loop() {
   if (timeNowMs - lastCanMessageReceivedMs > 100) {
     Serial.println("ERROR: CAN bus timeout, aborting.");
     num_can_bus_timeouts++;
-    sendNumCanBusTimeouts();
+    if (mode == Mode::RACECHRONO) {
+      sendNumCanBusTimeouts();
+    }
     stopCanBusReader();
     return;
   }
@@ -266,8 +351,16 @@ void loop() {
       continue;
     }
 
-    bufferNewPacket(pid, data, data_length);
+    if (mode == Mode::RACECHRONO) {
+      bufferNewPacket(pid, data, data_length);
+    } else {
+      webDebugRecordFrame(pid, data, data_length);
+    }
     lastCanMessageReceivedMs = millis();
+  }
+
+  if (mode != Mode::RACECHRONO) {
+    return;
   }
 
   handleOneBufferedPacket();
@@ -294,6 +387,7 @@ uint8_t bufferToReadFrom = 0;
 void bufferNewPacket(uint32_t pid, uint8_t *data, uint8_t data_length) {
   if (bufferToWriteTo - bufferToReadFrom == NUM_BUFFERS) {
     Serial.println("WARNING: Receive buffer overflow, dropping one message.");
+    num_buffer_overflows++;
 
     // In case of a buffer overflow, drop the oldest message in the buffer, as
     // it's likely less useful than the newest one.

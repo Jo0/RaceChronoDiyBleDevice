@@ -36,6 +36,31 @@ void canBusReaderEnd();
 // as the original MCP2515-based loop treated them.
 bool canBusReaderReceive(uint32_t *id, uint8_t *data, uint8_t *length);
 
+struct CanBusReaderStats {
+  // The driver is installed and the controller is in its running state.
+  bool running;
+  // The controller went bus-off (or is recovering from it).
+  bool busOff;
+  // Current Receive Error Counter (REC) of the running driver instance.
+  uint32_t rxErrorCounter;
+  // The counters below are totals since boot. The TWAI driver resets its own
+  // counters on every canBusReaderEnd()/canBusReaderBegin() cycle (which the
+  // main sketch does on every 100 ms bus timeout), so they're folded into
+  // running totals here.
+  //
+  // Bit/stuff/CRC/form errors seen on the wire. Note that in listen-only mode
+  // the controller never sends error frames, and may not report every error
+  // a normal node would, so a miswired bus can also look merely silent.
+  uint32_t busErrors;
+  // Frames lost because the driver's RX queue (rx_queue_len) was full.
+  uint32_t rxMissed;
+  // Frames lost in the controller's hardware RX FIFO.
+  uint32_t rxOverrun;
+};
+
+// Safe to call whether or not the reader is currently running.
+void canBusReaderGetStats(CanBusReaderStats *stats);
+
 // Only valid after canBusReaderBegin(..., /*selfTest=*/true). Transmits one
 // frame using TWAI's "Self Reception Request" flag, which the driver queues
 // into our own RX queue on successful transmission -- per Espressif's own
