@@ -38,6 +38,8 @@ static const char WEB_DEBUG_PAGE[] = R"html(<!doctype html>
     padding: 10px 18px; color: #fff; background: var(--accent); cursor: pointer;
   }
   button.stop { background: var(--off); }
+  button.ghost { background: transparent; color: var(--fg); font-weight: 500;
+                 border: 1px solid var(--line); padding: 9px 14px; }
   .stat { color: var(--muted); font-size: 13px; }
   .stat b { color: var(--fg); font-weight: 600; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
@@ -88,6 +90,7 @@ static const char WEB_DEBUG_PAGE[] = R"html(<!doctype html>
 <h1>BRZ Telemetry &middot; CAN debug</h1>
 <div class="bar">
   <button id="toggle">Start CAN feed</button>
+  <button id="units" class="ghost" title="Switch decoded values between metric and imperial">km/h · °C</button>
   <span class="stat"><span id="linkDot" class="dot"></span><b id="link">connecting&hellip;</b></span>
   <span class="stat">CAN reader <b id="can">&ndash;</b></span>
   <span class="stat">Frames <b id="total">0</b></span>
@@ -134,6 +137,19 @@ function hexId(id) { return '0x' + id.toString(16).toUpperCase().padStart(3, '0'
 // b[0], B is b[1], ...; bytesToIntLe() is signed little-endian. |n| is how
 // many payload bytes the equation needs. Units are left blank where ft86.md
 // doesn't state one.
+//
+// Signals with a |kind| go through the metric/imperial toggle below. Their
+// |f| returns the unit the RaceChrono equation produces: m/s for speeds (the
+// 0.015694 multiplier is Subaru's ~0.0565 km/h-per-count wheel-speed scaling
+// divided by 3.6), deg C for temperatures. The car always sends metric over
+// CAN, whatever the cluster is set to display.
+const UNITS = {
+  metric: {speed: ['km/h', (v) => v * 3.6], temp: ['°C', (v) => v]},
+  imperial: {speed: ['mph', (v) => v * 2.2369363], temp: ['°F', (v) => v * 9 / 5 + 32]},
+};
+let unitSystem = 'metric';
+try { if (localStorage.getItem('units') === 'imperial') unitSystem = 'imperial'; } catch (e) {}
+
 const s8 = (b, i) => (b[i] >= 0x80 ? b[i] - 0x100 : b[i]);
 const s16le = (b, i) => { const v = b[i] | (b[i + 1] << 8); return v >= 0x8000 ? v - 0x10000 : v; };
 const SIGNALS = [
@@ -147,10 +163,10 @@ const SIGNALS = [
    // and 1 only for the 7 ("neutral") code.
    f: (b) => { const g = b[6] & 0xf; return g * (1 - Math.floor(Math.min(g, 7) / 7)); },
    fmt: (v) => (v === 0 ? 'N' : String(v))},
-  {g: 'Engine', name: 'Coolant temp', id: 0x360, n: 4, unit: '°C', f: (b) => b[3] - 40},
-  {g: 'Engine', name: 'Oil temp', id: 0x360, n: 3, unit: '°C', f: (b) => b[2] - 40},
+  {g: 'Engine', name: 'Coolant temp', id: 0x360, n: 4, kind: 'temp', f: (b) => b[3] - 40},
+  {g: 'Engine', name: 'Oil temp', id: 0x360, n: 3, kind: 'temp', f: (b) => b[2] - 40},
 
-  {g: 'Chassis', name: 'Speed', id: 0xD1, n: 2, unit: 'km/h', dp: 1, f: (b) => s16le(b, 0) * 0.015694},
+  {g: 'Chassis', name: 'Speed', id: 0xD1, n: 2, kind: 'speed', dp: 1, f: (b) => s16le(b, 0) * 0.015694},
   {g: 'Chassis', name: 'Brake', id: 0xD1, n: 3, unit: '%', f: (b) => Math.min(b[2] / 0.7, 100)},
   {g: 'Chassis', name: 'Brake pressure', id: 0xD1, n: 3, unit: '', f: (b) => b[2] * 128},
   {g: 'Chassis', name: 'Steering angle', id: 0xD0, n: 2, unit: '°', dp: 1,
@@ -158,29 +174,47 @@ const SIGNALS = [
   {g: 'Chassis', name: 'Yaw rate', id: 0xD0, n: 4, unit: '°/s', dp: 1, f: (b) => s16le(b, 2) * -0.286478897},
   {g: 'Chassis', name: 'Lateral accel', id: 0xD0, n: 7, unit: '', dp: 1, f: (b) => s8(b, 6) * 0.2},
   {g: 'Chassis', name: 'Long. accel', id: 0xD0, n: 8, unit: '', dp: 1, f: (b) => s8(b, 7) * -0.1},
-  {g: 'Chassis', name: 'Wheel FL', id: 0xD4, n: 2, unit: 'km/h', dp: 1, f: (b) => s16le(b, 0) * 0.015694},
-  {g: 'Chassis', name: 'Wheel FR', id: 0xD4, n: 4, unit: 'km/h', dp: 1, f: (b) => s16le(b, 2) * 0.015694},
-  {g: 'Chassis', name: 'Wheel RL', id: 0xD4, n: 6, unit: 'km/h', dp: 1, f: (b) => s16le(b, 4) * 0.015694},
-  {g: 'Chassis', name: 'Wheel RR', id: 0xD4, n: 8, unit: 'km/h', dp: 1, f: (b) => s16le(b, 6) * 0.015694},
+  {g: 'Chassis', name: 'Wheel FL', id: 0xD4, n: 2, kind: 'speed', dp: 1, f: (b) => s16le(b, 0) * 0.015694},
+  {g: 'Chassis', name: 'Wheel FR', id: 0xD4, n: 4, kind: 'speed', dp: 1, f: (b) => s16le(b, 2) * 0.015694},
+  {g: 'Chassis', name: 'Wheel RL', id: 0xD4, n: 6, kind: 'speed', dp: 1, f: (b) => s16le(b, 4) * 0.015694},
+  {g: 'Chassis', name: 'Wheel RR', id: 0xD4, n: 8, kind: 'speed', dp: 1, f: (b) => s16le(b, 6) * 0.015694},
 ];
 
 for (const s of SIGNALS) {
   const tile = document.createElement('div');
   tile.className = 'tile stale';
   tile.innerHTML = '<div class="k"><span>' + s.name + '</span><span>' + hexId(s.id) +
-      '</span></div><div class="v"><span>&ndash;</span><span class="u">' + s.unit + '</span></div>';
+      '</span></div><div class="v"><span>&ndash;</span><span class="u"></span></div>';
   $('sig' + s.g).appendChild(tile);
   s.tile = tile;
   s.value = tile.querySelector('.v span');
+  s.unitEl = tile.querySelector('.u');
 }
 
+function applyUnitLabels() {
+  const u = UNITS[unitSystem];
+  for (const s of SIGNALS) s.unitEl.textContent = s.kind ? u[s.kind][0] : s.unit;
+  $('units').textContent = u.speed[0] + ' · ' + u.temp[0];
+}
+
+$('units').onclick = () => {
+  unitSystem = unitSystem === 'metric' ? 'imperial' : 'metric';
+  try { localStorage.setItem('units', unitSystem); } catch (e) {}
+  applyUnitLabels();
+  renderSignals(lastById);
+};
+applyUnitLabels();
+
 // |byId|: CAN ID -> {b: payload bytes, age: ms since last seen}.
+let lastById = new Map();
 function renderSignals(byId) {
+  lastById = byId;
   for (const s of SIGNALS) {
     const frame = byId.get(s.id);
     let text = '–', stale = true;
     if (frame && frame.b.length >= s.n) {
-      const v = s.f(frame.b);
+      let v = s.f(frame.b);
+      if (s.kind) v = UNITS[unitSystem][s.kind][1](v);
       text = s.fmt ? s.fmt(v) : v.toFixed(s.dp || 0);
       stale = frame.age > 1000;
     }
