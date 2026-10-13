@@ -10,6 +10,9 @@
 // can_bus_reader.h/.cpp for that, and docs/D29-CAN-Bus-Power-Wiring.md
 // section 5 for why these two GPIOs specifically (picked to avoid this
 // board's strapping pins and its I2C/SPI/RGB-LED/UART0 pin assignments).
+// Never use GPIO43/44 (TX0/RX0) here: the ROM bootloader prints its boot log
+// on GPIO43 before this firmware runs, which would go straight onto the car's
+// CAN bus through CTX.
 const int CAN_TX_PIN = 4;  // -> SN65HVD230 CTX
 const int CAN_RX_PIN = 5;  // <- SN65HVD230 CRX
 

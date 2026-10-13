@@ -312,7 +312,7 @@ function diagnose(s) {
   }
   return ['bad', 'CAN bus is silent',
       'No frames and no errors. Check, in order: the car is in ACC or ON; CANH/CANL are ' +
-      'connected; the transceiver has 3V3 and GND; CTX/CRX go to GPIO4/GPIO5. In ' +
+      'connected; the transceiver has 3V3 and GND; CTX goes to GPIO4 and CRX to GPIO5. In ' +
       'listen-only mode some wiring faults (e.g. swapped CANH/CANL) can also look silent.'];
 }
 
