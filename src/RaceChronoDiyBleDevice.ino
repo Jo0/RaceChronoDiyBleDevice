@@ -1,3 +1,4 @@
+#include <NimBLEDevice.h>
 #include <RaceChrono.h>
 
 #include "can_bus_reader.h"
@@ -163,6 +164,16 @@ void setup() {
 
   Serial.println("Setting up BLE...");
   RaceChronoBle.setUp(DEVICE_NAME, &raceChronoHandler);
+
+  // RaceChrono itself never pairs, but Android will if the device is ever
+  // tapped in Bluetooth settings, and Android 16+ re-pairs on its own when
+  // a stored bond's key is missing. NimBLE-Arduino defaults to pairing
+  // *without* bonding, so the phone kept an LTK this board never stored:
+  // every reconnect then failed encryption ("key missing"), kicked off an
+  // automatic re-pair, and the link dropped 5-30 s later. Bonding (stored in
+  // NVS, survives power cycles) makes any pairing stick on both ends.
+  NimBLEDevice::setSecurityAuth(/*bonding=*/true, /*mitm=*/false, /*sc=*/true);
+
   RaceChronoBle.startAdvertising();
 
   Serial.println("Setting up the Wi-Fi debug page...");
