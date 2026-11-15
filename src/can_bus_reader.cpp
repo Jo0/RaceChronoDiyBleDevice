@@ -4,6 +4,18 @@
 
 #include "driver/twai.h"
 
+namespace {
+
+bool driverRunning = false;
+
+// Counters carried over from driver instances that have since been
+// uninstalled. See CanBusReaderStats.
+uint32_t pastBusErrors = 0;
+uint32_t pastRxMissed = 0;
+uint32_t pastRxOverrun = 0;
+
+}  // namespace
+
 bool canBusReaderBegin(int rxPin, int txPin, long bitRate, bool selfTest) {
   twai_mode_t mode = selfTest ? TWAI_MODE_NO_ACK : TWAI_MODE_LISTEN_ONLY;
   twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(
@@ -44,12 +56,41 @@ bool canBusReaderBegin(int rxPin, int txPin, long bitRate, bool selfTest) {
     return false;
   }
 
+  driverRunning = true;
   return true;
 }
 
 void canBusReaderEnd() {
+  twai_status_info_t info;
+  if (driverRunning && twai_get_status_info(&info) == ESP_OK) {
+    pastBusErrors += info.bus_error_count;
+    pastRxMissed += info.rx_missed_count;
+    pastRxOverrun += info.rx_overrun_count;
+  }
+
   twai_stop();
   twai_driver_uninstall();
+  driverRunning = false;
+}
+
+void canBusReaderGetStats(CanBusReaderStats *stats) {
+  *stats = {};
+  stats->busErrors = pastBusErrors;
+  stats->rxMissed = pastRxMissed;
+  stats->rxOverrun = pastRxOverrun;
+
+  twai_status_info_t info;
+  if (!driverRunning || twai_get_status_info(&info) != ESP_OK) {
+    return;
+  }
+
+  stats->running = info.state == TWAI_STATE_RUNNING;
+  stats->busOff = info.state == TWAI_STATE_BUS_OFF ||
+                  info.state == TWAI_STATE_RECOVERING;
+  stats->rxErrorCounter = info.rx_error_counter;
+  stats->busErrors += info.bus_error_count;
+  stats->rxMissed += info.rx_missed_count;
+  stats->rxOverrun += info.rx_overrun_count;
 }
 
 bool canBusReaderReceive(uint32_t *id, uint8_t *data, uint8_t *length) {

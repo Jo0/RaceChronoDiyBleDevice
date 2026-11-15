@@ -2,13 +2,28 @@
 #define RACECHRONO_BIY_BLE_DEVICE_CONFIG_H
 
 // Change the value to customize the name of your device.
-#define DEVICE_NAME "BRZ Telemetry"
+#define DEVICE_NAME "DIYBLE-CANBUS"
 
 // We use RaceChronoPidMap to keep track of stuff for each CAN ID.
 // In this implementation, we're going to ignore "update intervals" requested by
 // RaceChrono, and instead send every Nth CAN message we receive, per CAN ID, where
 // N is different for different PIDs.
 const uint8_t DEFAULT_UPDATE_RATE_DIVIDER = 10;
+
+// Wi-Fi debug access point (see src/web_debug.h). Join this network and
+// browse to http://10.0.0.1/ to view the CAN feed without RaceChrono. The
+// AP is only up while RaceChrono is NOT connected over BLE.
+#define WEB_DEBUG_AP_SSID "DIYBLE-CANBUS-AP"
+// Same 10.0.0.1/24 scheme bonogps uses for its AP, instead of the ESP32's
+// 192.168.4.1 default. The two are separate networks (a phone is only ever on
+// one), so sharing the address doesn't conflict.
+const IPAddress WEB_DEBUG_AP_IP(10, 0, 0, 1);
+// WPA2 needs 8-63 characters. Change this before taking the car anywhere.
+#define WEB_DEBUG_AP_PASSWORD "diyble-can-debug"
+// bonogps runs its AP on channel 1; 11 doesn't overlap with it.
+const uint8_t WEB_DEBUG_AP_CHANNEL = 11;
+// Streaming stops if the web page hasn't polled for this long.
+const uint32_t WEB_DEBUG_CLIENT_TIMEOUT_MS = 3000;
 
 // You need to pick one of the provided configurations below, or define your own
 // configuration. Your configuration should define the following constant and
