@@ -1,3 +1,4 @@
 .DS_store
 .pio/
-.vscode/
+.vscode/*
+!.vscode/extensions.json
