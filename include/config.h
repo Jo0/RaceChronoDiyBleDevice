@@ -8,7 +8,7 @@
 // In this implementation, we're going to ignore "update intervals" requested by
 // RaceChrono, and instead send every Nth CAN message we receive, per CAN ID, where
 // N is different for different PIDs.
-const uint8_t DEFAULT_UPDATE_RATE_DIVIDER = 10;
+const uint8_t DEFAULT_UPDATE_RATE_DIVIDER = 1;
 
 // Wi-Fi debug access point (see src/web_debug.h). Join this network and
 // browse to http://10.0.0.1/ to view the CAN feed without RaceChrono. The
