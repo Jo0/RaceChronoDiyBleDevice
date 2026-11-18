@@ -246,6 +246,10 @@ justify spending too much more time on it. If you want to thank me for what I've
 already shared, or support my future ideas, I will appreciate it if you send me
 some "boba tea money".
 
-Here's a PayPal shortcut for your convenience:
+That paragraph is from the original author, Timur; you can support his work
+through the [upstream project](https://github.com/timurrrr/RaceChronoDiyBleDevice).
 
-[![paypal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/donate?business=ZKULAWZFJKCES&item_name=Donation+to+support+the+RaceChronoDiyBleDevice+project+on+GitHub&currency_code=USD)
+If this fork (ESP32-S3 support, full-rate and packed CAN frames, BLE link
+diagnostics) helped you, you can support it on Ko-fi:
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/badjo0jo0)
