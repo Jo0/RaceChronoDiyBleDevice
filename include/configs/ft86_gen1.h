@@ -6,39 +6,23 @@
 
 const long BAUD_RATE = 500 * 1e3;  // 500k.
 
+// Every requested CAN ID is forwarded at its native bus rate. The dividers
+// inherited from upstream (25 Hz targets) were sized for an nRF52840 polling
+// an MCP2515 over SPI; this board reads CAN through the ESP32-S3's own TWAI
+// controller, so there's no reason to throw data away up front. Only IDs
+// RaceChrono asked for are forwarded at all (see bufferNewPacket()).
+//
+// Native rates of the IDs in can_db/ft86.md, for reference:
+//   0x140, 0x141, 0x142, 0x18                        100 Hz
+//   0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0x144, 0x152,
+//   0x156, 0x280                                      50 Hz
+//   0x360                                             20 Hz
+//
+// To throttle a specific ID again (e.g. if BLE can't keep up), return N > 1
+// for it here: only every Nth frame of that ID is then sent.
 uint8_t getUpdateRateDivider(uint32_t can_id) {
-  switch (can_id) {
-    // This is sent over the CAN bus 50 times per second and includes brake
-    // system pressure. It's useful to have this at the highest update rate
-    // possible, as braking can be very short, e.g. at autocross.
-    case 0xD1:
-      return 1;
-
-    // These are sent over the CAN bus 100 times per second, we want 25.
-    case 0x18:
-    case 0x140:
-    case 0x141:
-    case 0x142:
-      return 4;
-
-    // These are sent over the CAN bus 50 times per second, we want 25.
-    case 0xD0:
-    case 0xD2:
-    case 0xD3:
-    case 0xD4:
-    case 0x144:
-    case 0x152:
-    case 0x156:
-    case 0x280:
-      return 2;
-
-    // 0x360 is sent over the CAN bus 20 times per second, we want 1.
-    case 0x360:
-      return 20;
-
-    default:
-      return DEFAULT_UPDATE_RATE_DIVIDER;
-  }
+  (void)can_id;
+  return 1;
 }
 
 #endif // RACECHRONO_BIY_BLE_DEVICE_FT86_GEN1_H
